@@ -5,6 +5,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use openlimits::{
     exchange::Exchange, 
     exchange_ws::OpenLimitsWs, 
+    exchange_info::MarketPair,
     nash::{Nash, NashStream}, 
     model::{
         OrderBookRequest, 
@@ -12,10 +13,20 @@ use openlimits::{
         CancelAllOrdersRequest, 
         CancelOrderRequest,
         OpenLimitOrderRequest,
+        GetOrderHistoryRequest,
+        GetOrderRequest,
+        TradeHistoryRequest,
+        GetHistoricTradesRequest,
+        GetHistoricRatesRequest,
+        GetPriceTickerRequest,
         Paginator,
         Balance,
         OrderCanceled,
         Order,
+        Trade,
+        Interval,
+        Candle,
+        Ticker,
         websocket::{Subscription, OpenLimitsWebsocketMessage}
     }
 };
@@ -210,11 +221,87 @@ impl NashClient {
         self.handle.block_on(future).unwrap()
     }
 
+    /// List markets on exchange
+    pub fn list_markets(&self) -> Vec<MarketPair> {
+        // Todo: this should be fixed in openlimits
+        let future = self.client.refresh_market_info();
+        let out = self.handle.block_on(future).unwrap();
+        out.iter().map(|x| x.inner.read().unwrap().clone()).collect()
+    }
+
+    /// Get all open orders
+    pub fn get_all_open_orders(&self) -> Vec<Order<String>> {
+        let future = self.client.get_all_open_orders();
+        self.handle.block_on(future).unwrap()
+    }
+
+    /// Get order history
+    pub fn get_order_history(&self, market_pair: Option<&str>, paginator: Option<Paginator<String>>) -> Vec<Order<String>> {
+        let req = GetOrderHistoryRequest {
+            market_pair: market_pair.map(|x| x.to_string()),
+            paginator
+        };
+        let future = self.client.get_order_history(&req);
+        self.handle.block_on(future).unwrap()
+    }
+
+    /// Get historical trade data
+    pub fn get_historic_trades(&self, market_pair: &str, paginator: Option<Paginator<String>>) -> Vec<Trade<String, String>>{
+        let req = GetHistoricTradesRequest {
+            // TODO: why is market required here but not for order history?
+            market_pair: market_pair.to_string(),
+            paginator
+        };
+        let future = self.client.get_historic_trades(&req);
+        self.handle.block_on(future).unwrap()
+    }
+
+    /// Get historical price data (candles)
+    pub fn get_historic_rates(&self, market_pair: &str, paginator: Option<Paginator<String>>, interval: Interval) -> Vec<Candle>{
+        let req = GetHistoricRatesRequest {
+            market_pair: market_pair.to_string(),
+            paginator,
+            interval
+        };
+        let future = self.client.get_historic_rates(&req);
+        self.handle.block_on(future).unwrap()
+    }
+
+    /// Get ticker
+    pub fn get_ticker(&self, market_pair: &str) -> Ticker {
+        let req = GetPriceTickerRequest {
+            market_pair: market_pair.to_string()
+        };
+        let future = self.client.get_price_ticker(&req);
+        self.handle.block_on(future).unwrap()
+    }
+
+    /// Get order by id
+    pub fn get_order(&self, id: &str, market_pair: Option<&str>) -> Order<String> {
+        let req = GetOrderRequest {
+            market_pair: market_pair.map(|x| x.to_string()),
+            id: id.to_string()
+        };
+        let future = self.client.get_order(&req);
+        self.handle.block_on(future).unwrap()
+    }
+
+    /// Get account trade history
+    pub fn get_trade_history(&self, market_pair: Option<&str>, order_id: Option<&str>, paginator: Option<Paginator<String>>) -> Vec<Trade<String, String>> {
+        let req = TradeHistoryRequest {
+            market_pair: market_pair.map(|x| x.to_string()),
+            order_id: order_id.map(|x| x.to_string()),
+            paginator
+        };
+        let future = self.client.get_trade_history(&req);
+        self.handle.block_on(future).unwrap()
+    }
+
 }
 
 // register with python env
 #[pymodule]
-fn nash_python(py: Python, m: &PyModule) -> PyResult<()> {
+fn openlimits_python(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<NashClient>()?;
     Ok(())
 }

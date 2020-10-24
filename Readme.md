@@ -12,15 +12,15 @@ pip install maturin
 maturin build
 
 # you can then install similar to following:
-# pip install target/wheels/nash_python-0.1.0-cp38-cp38-macosx_10_7_x86_64.whl
+# pip install target/wheels/openlimits_python-0.1.0-cp38-cp38-macosx_10_7_x86_64.whl
 ```
 
 ### use within python
 
 ```python
-import nash_python
+import openlimits_python
 secret = "YOUR SECRET"
 session = "YOUR SESSION"
 
-client = nash_python.NashClient(secret, session)
+client = openlimits_python.NashClient(secret, session)
 ```

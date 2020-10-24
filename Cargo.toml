@@ -1,11 +1,11 @@
 [package]
-name = "nash-python"
+name = "openlimits-python"
 version = "0.1.0"
 authors = ["Ethan Fast <ejhfast@gmail.com>"]
 edition = "2018"
 
 [lib]
-name = "nash_python"
+name = "openlimits_python"
 crate-type = ["cdylib"]
 
 [dependencies.pyo3]
@@ -16,4 +16,4 @@ features = ["extension-module"]
 tokio = { version = "0.2", features = ["full"] }
 futures-util = "0.3"
 rust_decimal = "1.7.0"
-openlimits = { version = "*", path = "../openlimits-nash/openlimits" }
+openlimits = { version = "*", path = "../openlimits-nash/openlimits", features = ["python"] }
