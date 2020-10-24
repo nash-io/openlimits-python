@@ -37,6 +37,7 @@ impl NashClient {
     /// Create new client instance from api key secret and session
     #[new]
     pub fn new(secret: &str, session: &str) -> Self {
+        // runtime setup logic copied from the C++ wrapper made by https://github.com/MarginUG
 
         // channel used to shutdown runtime thread
         let (rt_shutdown_tx, rt_shutdown_rx) = tokio::sync::oneshot::channel();
@@ -52,7 +53,6 @@ impl NashClient {
                 .enable_all()
                 .build().expect("Could not create Tokio runtime");
             let rt_handle = rt.handle().clone();
-            println!("Tokio runtime is up and running");
 
             // Continue running until notified to shutdown
             rt.block_on(async move {
@@ -63,7 +63,6 @@ impl NashClient {
 
                 rt_shutdown_rx.await.expect("Tokio runtime shutdown channel had an error");
             });
-            println!("Tokio runtime shut down");
         });
 
         // this is handle to tokio runtime that we can use to execute futures in that runtime
