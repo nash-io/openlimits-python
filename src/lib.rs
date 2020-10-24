@@ -37,7 +37,7 @@ impl NashClient {
     /// Create new client instance from api key secret and session
     #[new]
     pub fn new(secret: &str, session: &str) -> Self {
-        // runtime setup logic copied from the C++ wrapper made by https://github.com/MarginUG
+        // runtime setup logic borrowed with small changes from the C++ wrapper made by https://github.com/MarginUG
 
         // channel used to shutdown runtime thread
         let (rt_shutdown_tx, rt_shutdown_rx) = tokio::sync::oneshot::channel();
@@ -131,16 +131,19 @@ impl NashClient {
         }
     }
 
+    /// Subscribe any endpoints endpoints supported by openlimits
     pub fn subscribe(&self, subscription: Subscription){
         self.sub_request_tx.send(subscription).expect("failed to start subscription");
     }
 
+    /// Blocking call to read subscription data from a global stream
     pub fn next_subscription_event(&mut self) -> OpenLimitsWebsocketMessage {
         let next_event = self.sub_stream_rx.next();
         let output = self.handle.block_on(next_event);
         output.unwrap()
     }
 
+    /// Request current order book state
     pub fn order_book(&self, market_name: &str) -> OrderBookResponse {
         let req = OrderBookRequest {
             market_pair: market_name.to_string()
@@ -149,6 +152,7 @@ impl NashClient {
         self.handle.block_on(future).unwrap()
     }
 
+    /// Cancel all orders, with optional market filter
     pub fn cancel_all_orders(&self, market_name: Option<&str>) -> Vec<OrderCanceled<String>> {
         let req = CancelAllOrdersRequest {
             market_pair: market_name.map(|x| x.to_string())
@@ -157,6 +161,7 @@ impl NashClient {
         self.handle.block_on(future).unwrap()
     }
 
+    /// Cancel a single order
     pub fn cancel_order(&self, market_pair: &str, id: &str) -> OrderCanceled<String> {
         // TODO: why is market pair required here?
         let req = CancelOrderRequest {
@@ -167,6 +172,7 @@ impl NashClient {
         self.handle.block_on(future).unwrap()
     }
 
+    /// Sell limit order
     pub fn limit_sell(&self, market_pair: &str, size: &str, price: &str) -> Order<String> {
         let req = OpenLimitOrderRequest {
             market_pair: market_pair.to_string(),
@@ -177,6 +183,7 @@ impl NashClient {
         self.handle.block_on(future).unwrap()
     }
 
+    /// Buy limit order
     pub fn limit_buy(&self, market_pair: &str, size: &str, price: &str) -> Order<String> {
         let req = OpenLimitOrderRequest {
             market_pair: market_pair.to_string(),
@@ -187,6 +194,7 @@ impl NashClient {
         self.handle.block_on(future).unwrap()
     }
 
+    /// Get balances for current account session
     pub fn get_account_balances(&self, page: Option<String>) -> Vec<Balance> {
         let page = page.map(|x| {
             // TODO: is this correct?
