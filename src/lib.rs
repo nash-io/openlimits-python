@@ -1,7 +1,8 @@
 use pyo3::prelude::*;
-
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::Mutex;
+use std::sync::Arc;
 use openlimits::{
     exchange::Exchange, 
     exchange_ws::OpenLimitsWs, 
@@ -38,8 +39,7 @@ pub struct NashClient {
     pub runtime: ManagedRuntime,
     pub client: Nash,
     pub sub_request_tx: UnboundedSender<Subscription>,
-    pub sub_stream_rx: UnboundedReceiver<OpenLimitsWebsocketMessage>,
-    pub py_callback_tx: UnboundedSender<PyObject>,
+    callback: Arc<Mutex<Option<PyObject>>>
 }
 
 pub struct ManagedRuntime {
@@ -49,6 +49,7 @@ pub struct ManagedRuntime {
 }
 
 impl ManagedRuntime {
+    /// Create a new tokio runtime running in another thread that we can communicate with
     pub fn new() -> Self {
         // channel to manage shutting down the runtime
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -112,7 +113,7 @@ impl NashClient {
     /// Create new client instance from api key secret and session
     #[new]
     pub fn new(secret: &str, session: &str) -> Self {
-
+        // create a tokio runtime running in a background process that we can communicate with
         let runtime = ManagedRuntime::new();
 
         // now we use the runtime handle to initialize the client that we will use for basic requests
@@ -122,13 +123,15 @@ impl NashClient {
         // this channel will be used to push subscription data back to the nash client, where we can retrieve it
         // it is an unbounded channel, so messages will accumulate there (in memory) if we don't pull them out fast enough
         let (sub_request_tx, mut sub_rx) = tokio::sync::mpsc::unbounded_channel();
-        // this is the channel we will use to pipe subscription requests into the tokio runtime loop, where they can be sent out
-        let (incoming_sub_tx, sub_stream_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (py_callback_tx, mut py_callback_rx) = tokio::sync::mpsc::unbounded_channel::<PyObject>();
 
         // make a copy of the refenced data to move into the thread (todo: clean this up)
         let secret = secret.to_string();
         let session = session.to_string();
+
+        // This will hold a mutable reference to a future python callback function that we can share across threads
+        let callback: Arc<Mutex<Option<PyObject>>> = Arc::new(Mutex::new(None));
+        // Make a copy of the callback ref that we can move into the WS runtime loop
+        let callback_copy = callback.clone();
 
         // now we actually spawn the process where we will loop over incoming/outgoing subscription data
         // we use the handle to the tokio runtime, which is itself running inside an independent normal thread
@@ -137,13 +140,10 @@ impl NashClient {
             let ws_client = NashStream::with_credential(&secret, &session, 0, false, 10000).await;
             let mut client = OpenLimitsWs { websocket: ws_client };
 
-            let py_callback = py_callback_rx.next().await.unwrap();
-
             loop {
-
                 let next_outgoing_sub = sub_rx.next();
                 let next_incoming_message = client.next();
-                // here we check for either somethign we need to send out, or something coming in
+                // here we check for either something we need to send out, or something coming in
                 match select(next_outgoing_sub, next_incoming_message).await {
                     // if something to send out (new subscription request), then send it
                     Either::Left((sub, _)) => {
@@ -154,20 +154,21 @@ impl NashClient {
                             println!("Something went wrong...");
                         }
                     },
-                    // if something is coming in on the subscription, push it down the channel to client
+                    // if something is coming in on the subscription, push it down the callback
                     Either::Right((message, _)) => {
                         let message = message.unwrap().unwrap();
-                        // copy of message for python execution
-                        let message_copy = message.clone();
-                        incoming_sub_tx.send(message).expect("failed to send incoming message down channel");
-                        // move a copy of the callback and execute within blocking tokio thread
-                        let py_callback_copy = py_callback.clone();
-                        tokio::task::spawn_blocking(move || {
-                            // this takes out lock on Python GIL
-                            Python::with_gil(|py| {
-                                let _out = py_callback_copy.call1(py, (message_copy,)).unwrap();
+                        // extract the current python callback function if we have one
+                        if let Some(py_callback) = callback_copy.lock().await.as_ref() {
+                            // move a copy of the callback and execute within a blocking tokio thread
+                            let py_callback_copy = py_callback.clone();
+                            tokio::task::spawn_blocking(move || {
+                                // this takes out lock on Python GIL
+                                Python::with_gil(|py| {
+                                    let _out = py_callback_copy.call1(py, (message,)).unwrap();
+                                });
                             });
-                        });
+                        }
+                        
                     }
                 };
             }
@@ -178,22 +179,24 @@ impl NashClient {
             runtime,
             client,
             sub_request_tx,
-            sub_stream_rx,
-            py_callback_tx
+            callback
         }
     }
 
-    /// Subscribe any endpoints endpoints supported by openlimits
-    pub fn subscribe(&self, subscription: Subscription, pyfn: PyObject){
-        self.sub_request_tx.send(subscription).expect("failed to start subscription");
-        self.py_callback_tx.send(pyfn).expect("could not send python callback");
+    /// Provide a callable Python object (e.g., a lambda or function) that the WS runtime loop
+    /// will execute when a new subscription event is recieved. The function provided should
+    /// take one argument, which will be the Python representation of `OpenLimitsWebsocketMessage`
+    pub fn set_subscription_callback(&self, pyfn: PyObject){
+        let callback_copy = self.callback.clone();
+        let set_callback = async move {
+            *callback_copy.lock().await = Some(pyfn);
+        };
+        self.runtime.block_on(set_callback);
     }
 
-    /// Blocking call to read subscription data from a global stream
-    pub fn next_subscription_event(&mut self) -> OpenLimitsWebsocketMessage {
-        let next_event = self.sub_stream_rx.next();
-        let output = self.runtime.block_on(next_event);
-        output.unwrap()
+    /// Subscribe to any endpoints endpoints supported by openlimits
+    pub fn subscribe(&self, subscription: Subscription){
+        self.sub_request_tx.send(subscription).expect("failed to start subscription");
     }
 
     /// Request current order book state
