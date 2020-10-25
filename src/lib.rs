@@ -101,6 +101,7 @@ impl ManagedRuntime {
     }
     /// Notify to shutdown runtime inside thread
     pub fn shutdown(&mut self){
+        // we need ownership of the shutdown sender channel
         let shutdown_tx = std::mem::replace(&mut self.shutdown_tx, None);
         shutdown_tx.expect("Nothing to shutdown").send(()).expect("Something went wrong shutting down");
     }
@@ -156,13 +157,15 @@ impl NashClient {
                     // if something is coming in on the subscription, push it down the channel to client
                     Either::Right((message, _)) => {
                         let message = message.unwrap().unwrap();
+                        // copy of message for python execution
+                        let message_copy = message.clone();
                         incoming_sub_tx.send(message).expect("failed to send incoming message down channel");
                         // move a copy of the callback and execute within blocking tokio thread
                         let py_callback_copy = py_callback.clone();
                         tokio::task::spawn_blocking(move || {
                             // this takes out lock on Python GIL
                             Python::with_gil(|py| {
-                                let _out = py_callback_copy.call1(py, ()).unwrap();
+                                let _out = py_callback_copy.call1(py, (message_copy,)).unwrap();
                             });
                         });
                     }
