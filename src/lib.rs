@@ -2,8 +2,6 @@ use pyo3::prelude::*;
 
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use openlimits::{
     exchange::Exchange, 
     exchange_ws::OpenLimitsWs, 
@@ -33,55 +31,79 @@ use openlimits::{
     }
 };
 use rust_decimal::prelude::{Decimal, FromStr};
-use futures_util::future::{select, Either};
+use futures_util::future::{select, Either, Future};
 
 #[pyclass]
 pub struct NashClient {
-    pub request_rt_handle: tokio::runtime::Handle,
-    request_rt_shutdown_tx: tokio::sync::oneshot::Sender<()>,
-    request_thread_handle: std::thread::JoinHandle<()>,
+    pub runtime: ManagedRuntime,
     pub client: Nash,
     pub sub_request_tx: UnboundedSender<Subscription>,
     pub sub_stream_rx: UnboundedReceiver<OpenLimitsWebsocketMessage>,
     pub py_callback_tx: UnboundedSender<PyObject>,
 }
 
-// setup a tokio runtime in a new thread and get back handle to thread and runtime
-// logic borrowed with small changes from the C++ wrapper made by https://github.com/MarginUG
-pub fn launch_runtime(
-    shutdown_rx: tokio::sync::oneshot::Receiver<()> 
-) -> (std::thread::JoinHandle<()>, tokio::runtime::Handle) {
-    // channel we will use to send runtime handle back from runtime thread
-    let (rt_handle_tx, rt_handle_rx) = std::sync::mpsc::channel();
+pub struct ManagedRuntime {
+    runtime_handle: tokio::runtime::Handle,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    thread_handle: std::thread::JoinHandle<()>
+}
 
-    // launch the runtime thread. we will get handle to tokio runtime back on the channel
-    let rt_thread_handle = std::thread::spawn(move || {
-        println!("Creating Tokio runtime");
-        let mut rt = tokio::runtime::Builder::new()
-            .threaded_scheduler()
-            .core_threads(1)
-            .enable_all()
-            .build().expect("Could not create Tokio runtime");
-        let rt_handle = rt.handle().clone();
+impl ManagedRuntime {
+    pub fn new() -> Self {
+        // channel to manage shutting down the runtime
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        // channel we will use to send runtime handle back from runtime thread
+        let (rt_handle_tx, rt_handle_rx) = std::sync::mpsc::channel();
 
-        // Continue running until notified to shutdown
-        rt.block_on(async move {
-            // Share handle with parent thread
-            rt_handle_tx
-                .send(rt_handle)
-                .expect("Unable to give Tokio runtime handle to parent thread");
+        // launch the runtime thread. we will get handle to tokio runtime back on the channel
+        // thread setup logic borrowed with small changes from the C++ wrapper made by https://github.com/MarginU
+        let thread_handle = std::thread::spawn(move || {
+            let mut rt = tokio::runtime::Builder::new()
+                .threaded_scheduler()
+                .core_threads(1)
+                .enable_all()
+                .build().expect("Could not create Tokio runtime");
+            let rt_handle = rt.handle().clone();
 
-            shutdown_rx.await.expect("Tokio runtime shutdown channel had an error");
+            // Continue running until notified to shutdown
+            rt.block_on(async move {
+                // Share handle with parent thread
+                rt_handle_tx
+                    .send(rt_handle)
+                    .expect("Unable to give Tokio runtime handle to parent thread");
+
+                shutdown_rx.await.expect("Tokio runtime shutdown channel had an error");
+            });
         });
-    });
 
-    // this is handle to tokio runtime that we can use to execute futures in that runtime
-    let request_rt_handle = rt_handle_rx
-        .recv()
-        .expect("Unable to receive Tokio runtime handle from runtime thread");
+        // this is handle to tokio runtime that we can use to execute futures in that runtime
+        let runtime_handle = rt_handle_rx
+            .recv()
+            .expect("Unable to receive Tokio runtime handle from runtime thread");
 
-    // return handle to thread and tokio runtime
-    (rt_thread_handle, request_rt_handle)
+        Self {
+            runtime_handle,
+            thread_handle,
+            shutdown_tx: Some(shutdown_tx)
+        }
+    }
+    /// Execute future in the managed runtime (wrapper over tokio)
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output{
+        self.runtime_handle.block_on(future)
+    }
+    // Spawn process within managed runtime (wrapper over tokio) 
+    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where 
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.runtime_handle.spawn(future)
+    }
+    /// Notify to shutdown runtime inside thread
+    pub fn shutdown(&mut self){
+        let shutdown_tx = std::mem::replace(&mut self.shutdown_tx, None);
+        shutdown_tx.expect("Nothing to shutdown").send(()).expect("Something went wrong shutting down");
+    }
 }
 
 #[pymethods]
@@ -90,14 +112,11 @@ impl NashClient {
     #[new]
     pub fn new(secret: &str, session: &str) -> Self {
 
-        // channel used to shutdown request runtime thread
-        let (request_rt_shutdown_tx, request_rt_shutdown_rx) = tokio::sync::oneshot::channel();
-        // launch the request runtime thread and get thread and runtime handles
-        let (request_thread_handle, request_rt_handle) = launch_runtime(request_rt_shutdown_rx);
+        let runtime = ManagedRuntime::new();
 
         // now we use the runtime handle to initialize the client that we will use for basic requests
         let client_future = Nash::with_credential(secret, session, 0, false, 10000);
-        let client = request_rt_handle.block_on(client_future);
+        let client = runtime.block_on(client_future);
 
         // this channel will be used to push subscription data back to the nash client, where we can retrieve it
         // it is an unbounded channel, so messages will accumulate there (in memory) if we don't pull them out fast enough
@@ -112,7 +131,7 @@ impl NashClient {
 
         // now we actually spawn the process where we will loop over incoming/outgoing subscription data
         // we use the handle to the tokio runtime, which is itself running inside an independent normal thread
-        request_rt_handle.spawn(async move {
+        runtime.spawn(async move {
             // openlimits makes us initialize a separate client just for WS
             let ws_client = NashStream::with_credential(&secret, &session, 0, false, 10000).await;
             let mut client = OpenLimitsWs { websocket: ws_client };
@@ -138,8 +157,10 @@ impl NashClient {
                     Either::Right((message, _)) => {
                         let message = message.unwrap().unwrap();
                         incoming_sub_tx.send(message).expect("failed to send incoming message down channel");
+                        // move a copy of the callback and execute within blocking tokio thread
                         let py_callback_copy = py_callback.clone();
                         tokio::task::spawn_blocking(move || {
+                            // this takes out lock on Python GIL
                             Python::with_gil(|py| {
                                 let _out = py_callback_copy.call1(py, ()).unwrap();
                             });
@@ -151,13 +172,11 @@ impl NashClient {
         });
 
         Self {
-            request_rt_handle,
+            runtime,
             client,
             sub_request_tx,
             sub_stream_rx,
-            py_callback_tx,
-            request_rt_shutdown_tx,
-            request_thread_handle,
+            py_callback_tx
         }
     }
 
@@ -170,7 +189,7 @@ impl NashClient {
     /// Blocking call to read subscription data from a global stream
     pub fn next_subscription_event(&mut self) -> OpenLimitsWebsocketMessage {
         let next_event = self.sub_stream_rx.next();
-        let output = self.request_rt_handle.block_on(next_event);
+        let output = self.runtime.block_on(next_event);
         output.unwrap()
     }
 
@@ -180,7 +199,7 @@ impl NashClient {
             market_pair: market_name.to_string()
         };
         let future = self.client.order_book(&req);
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
     /// Cancel all orders, with optional market filter
@@ -189,7 +208,7 @@ impl NashClient {
             market_pair: market_name.map(|x| x.to_string())
         };
         let future = self.client.cancel_all_orders(&req);
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
     /// Cancel a single order
@@ -200,7 +219,7 @@ impl NashClient {
             id:id.to_string()
         };
         let future = self.client.cancel_order(&req);
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
     /// Sell limit order
@@ -211,7 +230,7 @@ impl NashClient {
             price: Decimal::from_str(price).unwrap()
         };
         let future = self.client.limit_sell(&req);
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
     /// Buy limit order
@@ -222,7 +241,7 @@ impl NashClient {
             price: Decimal::from_str(price).unwrap()
         };
         let future = self.client.limit_buy(&req);
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
     /// Get balances for current account session
@@ -238,21 +257,21 @@ impl NashClient {
             }
         });
         let future = self.client.get_account_balances(page);
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
     /// List markets on exchange
     pub fn list_markets(&self) -> Vec<MarketPair> {
         // Todo: this should be fixed in openlimits
         let future = self.client.refresh_market_info();
-        let out = self.request_rt_handle.block_on(future).unwrap();
+        let out = self.runtime.block_on(future).unwrap();
         out.iter().map(|x| x.inner.read().unwrap().clone()).collect()
     }
 
     /// Get all open orders
     pub fn get_all_open_orders(&self) -> Vec<Order<String>> {
         let future = self.client.get_all_open_orders();
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
     /// Get order history
@@ -262,7 +281,7 @@ impl NashClient {
             paginator
         };
         let future = self.client.get_order_history(&req);
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
     /// Get historical trade data
@@ -273,7 +292,7 @@ impl NashClient {
             paginator
         };
         let future = self.client.get_historic_trades(&req);
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
     /// Get historical price data (candles)
@@ -284,7 +303,7 @@ impl NashClient {
             interval
         };
         let future = self.client.get_historic_rates(&req);
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
     /// Get ticker
@@ -293,7 +312,7 @@ impl NashClient {
             market_pair: market_pair.to_string()
         };
         let future = self.client.get_price_ticker(&req);
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
     /// Get order by id
@@ -303,7 +322,7 @@ impl NashClient {
             id: id.to_string()
         };
         let future = self.client.get_order(&req);
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
     /// Get account trade history
@@ -314,7 +333,7 @@ impl NashClient {
             paginator
         };
         let future = self.client.get_trade_history(&req);
-        self.request_rt_handle.block_on(future).unwrap()
+        self.runtime.block_on(future).unwrap()
     }
 
 }
