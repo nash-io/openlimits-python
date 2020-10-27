@@ -1,13 +1,13 @@
 use pyo3::prelude::*;
 use tokio::stream::StreamExt;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use openlimits::{
-    exchange::Exchange, 
+    exchange::{OpenLimits, ExchangeAccount, ExchangeMarketData}, 
     exchange_ws::OpenLimitsWs, 
-    exchange_info::MarketPair,
-    nash::{Nash, NashStream}, 
+    exchange_info::{MarketPair, ExchangeInfoRetrieval},
+    nash::{Nash, NashStream, NashCredentials, NashParameters, Environment}, 
     model::{
         OrderBookRequest, 
         OrderBookResponse,
@@ -28,7 +28,7 @@ use openlimits::{
         Interval,
         Candle,
         Ticker,
-        websocket::{Subscription, OpenLimitsWebsocketMessage}
+        websocket::Subscription
     }
 };
 use rust_decimal::prelude::{Decimal, FromStr};
@@ -117,16 +117,22 @@ impl NashClient {
         let runtime = ManagedRuntime::new();
 
         // now we use the runtime handle to initialize the client that we will use for basic requests
-        let client_future = Nash::with_credential(secret, session, 0, false, 10000);
+        let credentials = NashCredentials {
+            secret: secret.to_string(),
+            session: session.to_string()
+        };
+        let init_params = NashParameters {
+            credentials: Some(credentials),
+            environment: Environment::Production,
+            client_id: 0,
+            timeout: 10000
+        };
+        let client_future = OpenLimits::instantiate(init_params.clone());
         let client = runtime.block_on(client_future);
 
         // this channel will be used to push subscription data back to the nash client, where we can retrieve it
         // it is an unbounded channel, so messages will accumulate there (in memory) if we don't pull them out fast enough
         let (sub_request_tx, mut sub_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        // make a copy of the refenced data to move into the thread (todo: clean this up)
-        let secret = secret.to_string();
-        let session = session.to_string();
 
         // This will hold a mutable reference to a future python callback function that we can share across threads
         let callback: Arc<Mutex<Option<PyObject>>> = Arc::new(Mutex::new(None));
@@ -137,8 +143,7 @@ impl NashClient {
         // we use the handle to the tokio runtime, which is itself running inside an independent normal thread
         runtime.spawn(async move {
             // openlimits makes us initialize a separate client just for WS
-            let ws_client = NashStream::with_credential(&secret, &session, 0, false, 10000).await;
-            let mut client = OpenLimitsWs { websocket: ws_client };
+            let mut client: OpenLimitsWs<NashStream> = OpenLimitsWs::instantiate(init_params).await;
 
             loop {
                 let next_outgoing_sub = sub_rx.next();
@@ -209,7 +214,7 @@ impl NashClient {
     }
 
     /// Cancel all orders, with optional market filter
-    pub fn cancel_all_orders(&self, market_name: Option<&str>) -> Vec<OrderCanceled<String>> {
+    pub fn cancel_all_orders(&self, market_name: Option<&str>) -> Vec<OrderCanceled> {
         let req = CancelAllOrdersRequest {
             market_pair: market_name.map(|x| x.to_string())
         };
@@ -218,7 +223,7 @@ impl NashClient {
     }
 
     /// Cancel a single order
-    pub fn cancel_order(&self, market_pair: &str, id: &str) -> OrderCanceled<String> {
+    pub fn cancel_order(&self, market_pair: &str, id: &str) -> OrderCanceled {
         // TODO: why is market pair required here?
         let req = CancelOrderRequest {
             market_pair: Some(market_pair.to_string()),
@@ -229,7 +234,7 @@ impl NashClient {
     }
 
     /// Sell limit order
-    pub fn limit_sell(&self, market_pair: &str, size: &str, price: &str) -> Order<String> {
+    pub fn limit_sell(&self, market_pair: &str, size: &str, price: &str) -> Order {
         let req = OpenLimitOrderRequest {
             market_pair: market_pair.to_string(),
             size: Decimal::from_str(size).unwrap(),
@@ -240,7 +245,7 @@ impl NashClient {
     }
 
     /// Buy limit order
-    pub fn limit_buy(&self, market_pair: &str, size: &str, price: &str) -> Order<String> {
+    pub fn limit_buy(&self, market_pair: &str, size: &str, price: &str) -> Order {
         let req = OpenLimitOrderRequest {
             market_pair: market_pair.to_string(),
             size: Decimal::from_str(size).unwrap(),
@@ -275,13 +280,13 @@ impl NashClient {
     }
 
     /// Get all open orders
-    pub fn get_all_open_orders(&self) -> Vec<Order<String>> {
+    pub fn get_all_open_orders(&self) -> Vec<Order> {
         let future = self.client.get_all_open_orders();
         self.runtime.block_on(future).unwrap()
     }
 
     /// Get order history
-    pub fn get_order_history(&self, market_pair: Option<&str>, paginator: Option<Paginator<String>>) -> Vec<Order<String>> {
+    pub fn get_order_history(&self, market_pair: Option<&str>, paginator: Option<Paginator>) -> Vec<Order> {
         let req = GetOrderHistoryRequest {
             market_pair: market_pair.map(|x| x.to_string()),
             paginator
@@ -291,7 +296,12 @@ impl NashClient {
     }
 
     /// Get historical trade data
-    pub fn get_historic_trades(&self, market_pair: &str, paginator: Option<Paginator<String>>) -> Vec<Trade<String, String>>{
+    pub fn get_historic_trades(
+        &self, 
+        market_pair: &str, 
+        paginator: Option<Paginator>
+    ) -> Vec<Trade>
+    {
         let req = GetHistoricTradesRequest {
             // TODO: why is market required here but not for order history?
             market_pair: market_pair.to_string(),
@@ -302,7 +312,7 @@ impl NashClient {
     }
 
     /// Get historical price data (candles)
-    pub fn get_historic_rates(&self, market_pair: &str, paginator: Option<Paginator<String>>, interval: Interval) -> Vec<Candle>{
+    pub fn get_historic_rates(&self, market_pair: &str, paginator: Option<Paginator>, interval: Interval) -> Vec<Candle>{
         let req = GetHistoricRatesRequest {
             market_pair: market_pair.to_string(),
             paginator,
@@ -322,7 +332,7 @@ impl NashClient {
     }
 
     /// Get order by id
-    pub fn get_order(&self, id: &str, market_pair: Option<&str>) -> Order<String> {
+    pub fn get_order(&self, id: &str, market_pair: Option<&str>) -> Order {
         let req = GetOrderRequest {
             market_pair: market_pair.map(|x| x.to_string()),
             id: id.to_string()
@@ -332,7 +342,7 @@ impl NashClient {
     }
 
     /// Get account trade history
-    pub fn get_trade_history(&self, market_pair: Option<&str>, order_id: Option<&str>, paginator: Option<Paginator<String>>) -> Vec<Trade<String, String>> {
+    pub fn get_trade_history(&self, market_pair: Option<&str>, order_id: Option<&str>, paginator: Option<Paginator>) -> Vec<Trade> {
         let req = TradeHistoryRequest {
             market_pair: market_pair.map(|x| x.to_string()),
             order_id: order_id.map(|x| x.to_string()),

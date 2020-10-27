@@ -1,26 +1,21 @@
 ## python-openlimits
 
-Starting point for Openlimits wrapper in Python using pyo3 for rust-python bindings. WIP. Currently only works for
-the Nash openlimits client using the `pyo3` branch on openlimits
+Starting point for Openlimits wrapper in Python using pyo3 for rust-python bindings. Currently supports only Nash.
 
 ### build and install the python package
+
+Note that maturin requires that Rust/Cargo are installed on your system.
 
 ```bash
 # first install the maturin build tool
 pip install maturin
 # this will build the python package 
-maturin build
+maturin build --release
 
 # you can then install similar to following:
-# pip install target/wheels/openlimits_python-0.1.0-cp38-cp38-macosx_10_7_x86_64.whl
+pip install target/wheels/openlimits_python-0.1.0-cp38-cp38-macosx_10_7_x86_64.whl
 ```
 
-### use within python
+### example
 
-```python
-import openlimits_python
-secret = "YOUR SECRET"
-session = "YOUR SESSION"
-
-client = openlimits_python.NashClient(secret, session)
-```
+See an example interaction [here](examples/openlimits-python-example.ipynb)
