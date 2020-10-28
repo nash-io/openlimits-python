@@ -1,6 +1,6 @@
 ## python-openlimits
 
-Starting point for Openlimits wrapper in Python using pyo3 for rust-python bindings. Currently supports only Nash.
+Starting point for Openlimits wrapper in Python using pyo3 for rust-python bindings.
 
 ### build and install the python package
 
