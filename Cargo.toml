@@ -16,4 +16,4 @@ features = ["extension-module"]
 tokio = { version = "0.2", features = ["full"] }
 futures-util = "0.3"
 rust_decimal = "1.7.0"
-openlimits = { git = "https://github.com/nash-io/openlimits", features=["python"] }
+openlimits = { path = "../openlimits-nash/openlimits", features = ["python"] }

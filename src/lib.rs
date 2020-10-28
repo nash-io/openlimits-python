@@ -4,10 +4,10 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use openlimits::{
-    exchange::{OpenLimits, ExchangeAccount, ExchangeMarketData}, 
+    exchange::{OpenLimits, ExchangeAccount, ExchangeMarketData, Exchange}, 
     exchange_ws::OpenLimitsWs, 
     exchange_info::{MarketPair, ExchangeInfoRetrieval},
-    nash::{Nash, NashStream, NashCredentials, NashParameters, Environment}, 
+    any_exchange::{AnyExchange, InitAnyExchange, AnyWsExchange},
     model::{
         OrderBookRequest, 
         OrderBookResponse,
@@ -35,9 +35,9 @@ use rust_decimal::prelude::{Decimal, FromStr};
 use futures_util::future::{select, Either, Future};
 
 #[pyclass]
-pub struct NashClient {
+pub struct ExchangeClient {
     pub runtime: ManagedRuntime,
-    pub client: Nash,
+    pub client: AnyExchange,
     pub sub_request_tx: UnboundedSender<Subscription>,
     callback: Arc<Mutex<Option<PyObject>>>
 }
@@ -109,24 +109,13 @@ impl ManagedRuntime {
 }
 
 #[pymethods]
-impl NashClient {
+impl ExchangeClient {
     /// Create new client instance from api key secret and session
     #[new]
-    pub fn new(secret: &str, session: &str) -> Self {
+    pub fn new(init_params: InitAnyExchange) -> Self {
         // create a tokio runtime running in a background process that we can communicate with
         let runtime = ManagedRuntime::new();
 
-        // now we use the runtime handle to initialize the client that we will use for basic requests
-        let credentials = NashCredentials {
-            secret: secret.to_string(),
-            session: session.to_string()
-        };
-        let init_params = NashParameters {
-            credentials: Some(credentials),
-            environment: Environment::Production,
-            client_id: 0,
-            timeout: 10000
-        };
         let client_future = OpenLimits::instantiate(init_params.clone());
         let client = runtime.block_on(client_future);
 
@@ -143,7 +132,7 @@ impl NashClient {
         // we use the handle to the tokio runtime, which is itself running inside an independent normal thread
         runtime.spawn(async move {
             // openlimits makes us initialize a separate client just for WS
-            let mut client: OpenLimitsWs<NashStream> = OpenLimitsWs::instantiate(init_params).await;
+            let mut client: OpenLimitsWs<AnyWsExchange> = OpenLimitsWs::instantiate(init_params).await;
 
             loop {
                 let next_outgoing_sub = sub_rx.next();
@@ -357,7 +346,7 @@ impl NashClient {
 // register with python env
 #[pymodule]
 fn openlimits_python(py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_class::<NashClient>()?;
+    m.add_class::<ExchangeClient>()?;
     Ok(())
 }
 
