@@ -1,8 +1,8 @@
-## python-openlimits
+## OpenLimits Python Wrapper
 
 Starting point for Openlimits wrapper in Python using pyo3 for rust-python bindings.
 
-### build and install the python package
+### Build and install the python package
 
 Note that maturin requires that Rust/Cargo are installed on your system.
 
