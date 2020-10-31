@@ -28,6 +28,7 @@ use openlimits::{
         Interval,
         Candle,
         Ticker,
+        TimeInForce,
         websocket::Subscription
     }
 };
@@ -223,22 +224,24 @@ impl ExchangeClient {
     }
 
     /// Sell limit order
-    pub fn limit_sell(&self, market_pair: &str, size: &str, price: &str) -> Order {
+    pub fn limit_sell(&self, market_pair: &str, size: &str, price: &str, time_in_force: TimeInForce) -> Order {
         let req = OpenLimitOrderRequest {
             market_pair: market_pair.to_string(),
             size: Decimal::from_str(size).unwrap(),
-            price: Decimal::from_str(price).unwrap()
+            price: Decimal::from_str(price).unwrap(),
+            time_in_force
         };
         let future = self.client.limit_sell(&req);
         self.runtime.block_on(future).unwrap()
     }
 
     /// Buy limit order
-    pub fn limit_buy(&self, market_pair: &str, size: &str, price: &str) -> Order {
+    pub fn limit_buy(&self, market_pair: &str, size: &str, price: &str, time_in_force: TimeInForce) -> Order {
         let req = OpenLimitOrderRequest {
             market_pair: market_pair.to_string(),
             size: Decimal::from_str(size).unwrap(),
-            price: Decimal::from_str(price).unwrap()
+            price: Decimal::from_str(price).unwrap(),
+            time_in_force
         };
         let future = self.client.limit_buy(&req);
         self.runtime.block_on(future).unwrap()
