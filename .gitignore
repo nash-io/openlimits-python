@@ -3,3 +3,6 @@ Cargo.lock
 .env
 examples/.env
 examples/.ipy*
+
+# Ignore IntelliJ IDEA auto generated files.
+.idea

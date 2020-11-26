@@ -74,7 +74,9 @@ impl ManagedRuntime {
                     .send(rt_handle)
                     .expect("Unable to give Tokio runtime handle to parent thread");
 
-                shutdown_rx.await.expect("Tokio runtime shutdown channel had an error");
+                // We wait for a message from the sender. If it fails, it means the sender was terminated,
+                // so we no longer need to wait for it.
+                shutdown_rx.await.ok();
             });
         });
 
