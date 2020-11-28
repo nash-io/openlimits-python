@@ -136,8 +136,8 @@ impl ExchangeClient {
     }
 
     /// Subscribe to any endpoints endpoints supported by openlimits
-    pub fn subscribe(&self, subscription: Subscription, pyfn: PyObject){
-        let callback = Box::new(|message: &OpenLimitsResult<WebSocketResponse<OpenLimitsWebSocketMessage>>| {
+    pub fn subscribe(&self, subscription: Subscription, pyfn: PyObject) {
+        let callback = Box::new(move |message: &OpenLimitsResult<WebSocketResponse<OpenLimitsWebSocketMessage>>| {
             let py_callback_copy = pyfn.clone();
             if let Ok(WebSocketResponse::Generic(message)) = message {
                 let message = message.clone();
@@ -150,7 +150,7 @@ impl ExchangeClient {
             }
         });
         let sub_future = self.ws_client.subscribe(subscription, callback);
-        // self.sub_request_tx.send(subscription).expect("failed to start subscription");
+        self.runtime.block_on(sub_future).unwrap();
     }
 
     /// Request current order book state
