@@ -5,9 +5,10 @@ use tokio::sync::Mutex;
 use std::sync::Arc;
 use openlimits::{
     exchange::{OpenLimits, ExchangeAccount, ExchangeMarketData, Exchange}, 
-    exchange_ws::OpenLimitsWs, 
+    exchange_ws::{OpenLimitsWs, ExchangeWs}, 
     exchange_info::{MarketPair, ExchangeInfoRetrieval},
     any_exchange::{AnyExchange, InitAnyExchange, AnyWsExchange},
+    shared::Result as OpenLimitsResult,
     model::{
         OrderBookRequest, 
         OrderBookResponse,
@@ -29,7 +30,8 @@ use openlimits::{
         Candle,
         Ticker,
         TimeInForce,
-        websocket::Subscription
+        websocket::Subscription,
+        websocket::{WebSocketResponse, OpenLimitsWebSocketMessage}
     }
 };
 use rust_decimal::prelude::{Decimal, FromStr};
@@ -39,8 +41,7 @@ use futures_util::future::{select, Either, Future};
 pub struct ExchangeClient {
     pub runtime: ManagedRuntime,
     pub client: AnyExchange,
-    pub sub_request_tx: UnboundedSender<Subscription>,
-    callback: Arc<Mutex<Option<PyObject>>>
+    pub ws_client: OpenLimitsWs<AnyWsExchange>
 }
 
 pub struct ManagedRuntime {
@@ -111,6 +112,8 @@ impl ManagedRuntime {
     }
 }
 
+
+
 #[pymethods]
 impl ExchangeClient {
     /// Create new client instance from api key secret and session
@@ -122,78 +125,32 @@ impl ExchangeClient {
         let client_future = OpenLimits::instantiate(init_params.clone());
         let client = runtime.block_on(client_future);
 
-        // this channel will be used to push subscription data back to the nash client, where we can retrieve it
-        // it is an unbounded channel, so messages will accumulate there (in memory) if we don't pull them out fast enough
-        let (sub_request_tx, mut sub_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        // This will hold a mutable reference to a future python callback function that we can share across threads
-        let callback: Arc<Mutex<Option<PyObject>>> = Arc::new(Mutex::new(None));
-        // Make a copy of the callback ref that we can move into the WS runtime loop
-        let callback_copy = callback.clone();
-
-        // now we actually spawn the process where we will loop over incoming/outgoing subscription data
-        // we use the handle to the tokio runtime, which is itself running inside an independent normal thread
-        runtime.spawn(async move {
-            // openlimits makes us initialize a separate client just for WS
-            let mut client: OpenLimitsWs<AnyWsExchange> = OpenLimitsWs::instantiate(init_params).await;
-
-            loop {
-                let next_outgoing_sub = sub_rx.next();
-                let next_incoming_message = client.next();
-                // here we check for either something we need to send out, or something coming in
-                match select(next_outgoing_sub, next_incoming_message).await {
-                    // if something to send out (new subscription request), then send it
-                    Either::Left((sub, _)) => {
-                        let sub = sub.unwrap();
-                        if let Ok(_) = client.subscribe(sub).await {
-                            println!("Subscribed!");
-                        } else {
-                            println!("Something went wrong...");
-                        }
-                    },
-                    // if something is coming in on the subscription, push it down the callback
-                    Either::Right((message, _)) => {
-                        let message = message.unwrap().unwrap();
-                        // extract the current python callback function if we have one
-                        if let Some(py_callback) = callback_copy.lock().await.as_ref() {
-                            // move a copy of the callback and execute within a blocking tokio thread
-                            let py_callback_copy = py_callback.clone();
-                            tokio::task::spawn_blocking(move || {
-                                // this takes out lock on Python GIL
-                                Python::with_gil(|py| {
-                                    let _out = py_callback_copy.call1(py, (message,)).unwrap();
-                                });
-                            });
-                        }
-                        
-                    }
-                };
-            }
-
-        });
+        let ws_client_future = OpenLimitsWs::instantiate(init_params);
+        let ws_client: OpenLimitsWs<AnyWsExchange> = runtime.block_on(ws_client_future);
 
         Self {
             runtime,
             client,
-            sub_request_tx,
-            callback
+            ws_client,
         }
     }
 
-    /// Provide a callable Python object (e.g., a lambda or function) that the WS runtime loop
-    /// will execute when a new subscription event is recieved. The function provided should
-    /// take one argument, which will be the Python representation of `OpenLimitsWebsocketMessage`
-    pub fn set_subscription_callback(&self, pyfn: PyObject){
-        let callback_copy = self.callback.clone();
-        let set_callback = async move {
-            *callback_copy.lock().await = Some(pyfn);
-        };
-        self.runtime.block_on(set_callback);
-    }
-
     /// Subscribe to any endpoints endpoints supported by openlimits
-    pub fn subscribe(&self, subscription: Subscription){
-        self.sub_request_tx.send(subscription).expect("failed to start subscription");
+    pub fn subscribe(&self, subscription: Subscription, pyfn: PyObject) {
+        let callback = Box::new(move |message: &OpenLimitsResult<WebSocketResponse<OpenLimitsWebSocketMessage>>| {
+            let py_callback_copy = pyfn.clone();
+            if let Ok(WebSocketResponse::Generic(message)) = message {
+                let message = message.clone();
+                tokio::task::spawn_blocking(move || {
+                    // this takes out lock on Python GIL
+                    Python::with_gil(|py| {
+                        let _out = py_callback_copy.call1(py, (message,)).unwrap();
+                    });
+                });
+            }
+        });
+        let sub_future = self.ws_client.subscribe(subscription, callback);
+        self.runtime.block_on(sub_future).unwrap();
     }
 
     /// Request current order book state
@@ -226,11 +183,12 @@ impl ExchangeClient {
     }
 
     /// Sell limit order
-    pub fn limit_sell(&self, market_pair: &str, size: &str, price: &str, time_in_force: TimeInForce) -> Order {
+    pub fn limit_sell(&self, market_pair: &str, size: &str, price: &str, time_in_force: TimeInForce, post_only: bool) -> Order {
         let req = OpenLimitOrderRequest {
             market_pair: market_pair.to_string(),
             size: Decimal::from_str(size).unwrap(),
             price: Decimal::from_str(price).unwrap(),
+            post_only,
             time_in_force
         };
         let future = self.client.limit_sell(&req);
@@ -238,11 +196,12 @@ impl ExchangeClient {
     }
 
     /// Buy limit order
-    pub fn limit_buy(&self, market_pair: &str, size: &str, price: &str, time_in_force: TimeInForce) -> Order {
+    pub fn limit_buy(&self, market_pair: &str, size: &str, price: &str, time_in_force: TimeInForce, post_only: bool) -> Order {
         let req = OpenLimitOrderRequest {
             market_pair: market_pair.to_string(),
             size: Decimal::from_str(size).unwrap(),
             price: Decimal::from_str(price).unwrap(),
+            post_only,
             time_in_force
         };
         let future = self.client.limit_buy(&req);
