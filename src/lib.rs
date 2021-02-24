@@ -1,11 +1,7 @@
 use pyo3::prelude::*;
-use tokio::stream::StreamExt;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::Mutex;
-use std::sync::Arc;
 use openlimits::{
-    exchange::{OpenLimits, ExchangeAccount, ExchangeMarketData, Exchange}, 
-    exchange_ws::{OpenLimitsWs, ExchangeWs}, 
+    exchange::{OpenLimits, ExchangeAccount, ExchangeMarketData},
+    exchange_ws::{OpenLimitsWs},
     exchange_info::{MarketPair, ExchangeInfoRetrieval},
     any_exchange::{AnyExchange, InitAnyExchange, AnyWsExchange},
     shared::Result as OpenLimitsResult,
@@ -35,7 +31,7 @@ use openlimits::{
     }
 };
 use rust_decimal::prelude::{Decimal, FromStr};
-use futures_util::future::{select, Either, Future};
+use futures_util::future::Future;
 
 #[pyclass]
 pub struct ExchangeClient {
@@ -47,7 +43,7 @@ pub struct ExchangeClient {
 pub struct ManagedRuntime {
     runtime_handle: tokio::runtime::Handle,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
-    thread_handle: std::thread::JoinHandle<()>
+    _thread_handle: std::thread::JoinHandle<()>
 }
 
 impl ManagedRuntime {
@@ -60,7 +56,7 @@ impl ManagedRuntime {
 
         // launch the runtime thread. we will get handle to tokio runtime back on the channel
         // thread setup logic borrowed with small changes from the C++ wrapper made by https://github.com/MarginU
-        let thread_handle = std::thread::spawn(move || {
+        let _thread_handle = std::thread::spawn(move || {
             let mut rt = tokio::runtime::Builder::new()
                 .threaded_scheduler()
                 .core_threads(1)
@@ -88,7 +84,7 @@ impl ManagedRuntime {
 
         Self {
             runtime_handle,
-            thread_handle,
+            _thread_handle,
             shutdown_tx: Some(shutdown_tx)
         }
     }
@@ -123,10 +119,10 @@ impl ExchangeClient {
         let runtime = ManagedRuntime::new();
 
         let client_future = OpenLimits::instantiate(init_params.clone());
-        let client = runtime.block_on(client_future);
+        let client = runtime.block_on(client_future).expect("Couldn't create Client.");
 
         let ws_client_future = OpenLimitsWs::instantiate(init_params);
-        let ws_client: OpenLimitsWs<AnyWsExchange> = runtime.block_on(ws_client_future);
+        let ws_client: OpenLimitsWs<AnyWsExchange> = runtime.block_on(ws_client_future).expect("Couldn't create WebSocket Client.");
 
         Self {
             runtime,
@@ -241,6 +237,7 @@ impl ExchangeClient {
     /// Get order history
     pub fn get_order_history(&self, market_pair: Option<&str>, paginator: Option<Paginator>) -> Vec<Order> {
         let req = GetOrderHistoryRequest {
+            order_status: None,
             market_pair: market_pair.map(|x| x.to_string()),
             paginator
         };
@@ -309,7 +306,7 @@ impl ExchangeClient {
 
 // register with python env
 #[pymodule]
-fn openlimits_python(py: Python, m: &PyModule) -> PyResult<()> {
+fn openlimits_python(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<ExchangeClient>()?;
     Ok(())
 }
