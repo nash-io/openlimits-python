@@ -57,9 +57,8 @@ impl ManagedRuntime {
         // launch the runtime thread. we will get handle to tokio runtime back on the channel
         // thread setup logic borrowed with small changes from the C++ wrapper made by https://github.com/MarginU
         let _thread_handle = std::thread::spawn(move || {
-            let mut rt = tokio::runtime::Builder::new()
-                .threaded_scheduler()
-                .core_threads(1)
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
                 .enable_all()
                 .build().expect("Could not create Tokio runtime");
             let rt_handle = rt.handle().clone();
