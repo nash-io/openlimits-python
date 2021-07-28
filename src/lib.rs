@@ -1,10 +1,10 @@
 use pyo3::prelude::*;
 use openlimits::{
-    exchange::{OpenLimits, ExchangeAccount, ExchangeMarketData},
-    exchange_ws::{OpenLimitsWs},
-    exchange_info::{MarketPair, ExchangeInfoRetrieval},
-    any_exchange::{AnyExchange, InitAnyExchange, AnyWsExchange},
-    shared::Result as OpenLimitsResult,
+    OpenLimits,
+    exchange::traits::*,
+    exchange::any::*,
+    exchange::traits::info::*,
+    exchange::shared::Result as OpenLimitsResult,
     model::{
         OrderBookRequest, 
         OrderBookResponse,
@@ -32,6 +32,7 @@ use openlimits::{
 };
 use rust_decimal::prelude::{Decimal, FromStr};
 use futures_util::future::Future;
+use openlimits::exchange::traits::stream::OpenLimitsWs;
 
 #[pyclass]
 pub struct ExchangeClient {
