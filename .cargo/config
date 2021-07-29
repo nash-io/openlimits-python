@@ -1,2 +1,5 @@
 [target.x86_64-apple-darwin.gmp]
 rustc-link-search = ["/opt/homebrew/lib/", "/usr/local/lib/", "/opt/homebrew/Cellar/gmp/6.2.1/lib/"]
+
+[target.aarch64-apple-darwin.gmp]
+rustc-link-search = ["/opt/homebrew/lib/", "/usr/local/lib/", "/opt/homebrew/Cellar/gmp/6.2.1/lib/"]
