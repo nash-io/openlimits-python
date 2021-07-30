@@ -16,4 +16,4 @@ features = ["extension-module"]
 tokio = { version = "1.0", features = ["full"] }
 futures-util = "0.3"
 rust_decimal = "1.7.0"
-openlimits = { version = "0.1.16", features = ["python"] }
+openlimits = { version = "0.1.16", default-features = false, features = ["num_bigint", "python"] }
